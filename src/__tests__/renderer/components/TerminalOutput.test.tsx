@@ -241,8 +241,8 @@ describe('TerminalOutput', () => {
 			// User messages should render in a flex container
 			// Default alignment is 'right', which does not apply flex-row-reverse (corrected in ba807307)
 			const userMessageContainer = screen.getByText('User input here').closest('[data-log-index]');
-			expect(userMessageContainer).toBeInTheDocument();
-			expect(userMessageContainer).toHaveClass('flex');
+			expect(userMessageContainer).not.toBeNull();
+			expect(userMessageContainer!.className).toContain('flex');
 		});
 
 		it('shows delivered checkmark for delivered messages', () => {
