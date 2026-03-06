@@ -9,6 +9,8 @@
  */
 
 import * as os from 'os';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
 	GroupChatParticipant,
 	loadGroupChat,
@@ -40,7 +42,7 @@ import {
 	applyAgentConfigOverrides,
 	getContextWindowValue,
 } from '../utils/agent-args';
-import { groupChatParticipantRequestPrompt } from '../../prompts';
+import { groupChatParticipantRequestPrompt, autorunDefaultPrompt } from '../../prompts';
 import { wrapSpawnWithSsh } from '../utils/ssh-spawn-wrapper';
 import type { SshRemoteSettingsStore } from '../utils/ssh-remote-resolver';
 import { setGetCustomShellPathCallback, getWindowsSpawnConfig } from './group-chat-config';
@@ -72,6 +74,10 @@ export interface SessionInfo {
 		remoteId: string | null;
 		workingDirOverride?: string;
 	};
+	/** Auto Run folder path for this session */
+	autoRunFolderPath?: string;
+	/** Base directory for git worktrees (configured in agent settings) */
+	worktreeBasePath?: string;
 }
 
 /**
@@ -84,6 +90,10 @@ export type GetSessionsCallback = () => SessionInfo[];
  */
 export type GetCustomEnvVarsCallback = (agentId: string) => Record<string, string> | undefined;
 export type GetAgentConfigCallback = (agentId: string) => Record<string, any> | undefined;
+export type GetModeratorSettingsCallback = () => {
+	standingInstructions: string;
+	conductorProfile: string;
+};
 
 // Module-level callback for session lookup
 let getSessionsCallback: GetSessionsCallback | null = null;
@@ -91,6 +101,9 @@ let getSessionsCallback: GetSessionsCallback | null = null;
 // Module-level callback for custom env vars lookup
 let getCustomEnvVarsCallback: GetCustomEnvVarsCallback | null = null;
 let getAgentConfigCallback: GetAgentConfigCallback | null = null;
+
+// Module-level callback for moderator settings (standing instructions + conductor profile)
+let getModeratorSettingsCallback: GetModeratorSettingsCallback | null = null;
 
 // Module-level SSH store for remote execution support
 let sshStore: SshRemoteSettingsStore | null = null;
@@ -175,6 +188,14 @@ export function setGetAgentConfigCallback(callback: GetAgentConfigCallback): voi
 }
 
 /**
+ * Sets the callback for getting moderator settings (standing instructions + conductor profile).
+ * Called from index.ts during initialization.
+ */
+export function setGetModeratorSettingsCallback(callback: GetModeratorSettingsCallback): void {
+	getModeratorSettingsCallback = callback;
+}
+
+/**
  * Sets the SSH store for remote execution support.
  * Called from index.ts during initialization.
  */
@@ -238,6 +259,64 @@ export function extractAllMentions(text: string): string[] {
 	}
 
 	return mentions;
+}
+
+/**
+ * Extracts !autorun directives from moderator output.
+ * Matches `!autorun @AgentName` patterns.
+ *
+ * @param text - The moderator's message text
+ * @returns Object with autorun participant names and cleaned message text
+ */
+export function extractAutoRunDirectives(text: string): {
+	autoRunParticipants: string[];
+	cleanedText: string;
+} {
+	const autoRunParticipants: string[] = [];
+	const autoRunPattern = /!autorun\s+@([^\s@:,;!?()\[\]{}'"<>]+)/g;
+	let match;
+
+	while ((match = autoRunPattern.exec(text)) !== null) {
+		const name = match[1];
+		if (!autoRunParticipants.includes(name)) {
+			autoRunParticipants.push(name);
+		}
+	}
+
+	// Remove !autorun lines from the message for display
+	const cleanedText = text
+		.replace(/^.*!autorun\s+@[^\s@:,;!?()\[\]{}'"<>]+.*$/gm, '')
+		.replace(/\n{3,}/g, '\n\n')
+		.trim();
+
+	return { autoRunParticipants, cleanedText };
+}
+
+/**
+ * Reads Auto Run documents from a folder.
+ *
+ * @param folderPath - The Auto Run folder path
+ * @returns Array of document info with name, path, and content
+ */
+export function readAutoRunDocs(
+	folderPath: string
+): { name: string; path: string; content: string }[] {
+	try {
+		if (!fs.existsSync(folderPath)) {
+			return [];
+		}
+		const files = fs.readdirSync(folderPath).filter((f) => f.endsWith('.md'));
+		return files.map((f) => {
+			const fullPath = path.join(folderPath, f);
+			return {
+				name: f,
+				path: fullPath,
+				content: fs.readFileSync(fullPath, 'utf-8'),
+			};
+		});
+	} catch {
+		return [];
+	}
 }
 
 /**
@@ -411,10 +490,19 @@ export async function routeUserMessage(
 
 			// Build participant context
 			// Use normalized names (spaces → hyphens) so moderator can @mention them properly
+			const sessionsList = getSessionsCallback?.() || [];
 			const participantContext =
 				chat.participants.length > 0
 					? chat.participants
-							.map((p) => `- @${normalizeMentionName(p.name)} (${p.agentId} session)`)
+							.map((p) => {
+								const matchingSession = sessionsList.find(
+									(s) => mentionMatches(s.name, p.name) || s.name === p.name
+								);
+								const worktreeNote = matchingSession?.worktreeBasePath
+									? ` [worktree base: ${matchingSession.worktreeBasePath}]`
+									: '';
+								return `- @${normalizeMentionName(p.name)} (${p.agentId} session)${worktreeNote}`;
+							})
 							.join('\n')
 					: '(No agents currently in this group chat)';
 
@@ -444,7 +532,24 @@ export async function routeUserMessage(
 				.map((m) => `[${m.from}]: ${m.content}`)
 				.join('\n');
 
-			const fullPrompt = `${getModeratorSystemPrompt()}
+			// Get moderator settings for prompt customization
+			const moderatorSettings = getModeratorSettingsCallback?.() ?? {
+				standingInstructions: '',
+				conductorProfile: '',
+			};
+
+			// Substitute {{CONDUCTOR_PROFILE}} template variable
+			const baseSystemPrompt = getModeratorSystemPrompt().replace(
+				'{{CONDUCTOR_PROFILE}}',
+				moderatorSettings.conductorProfile || '(No conductor profile set)'
+			);
+
+			// Build standing instructions section if configured
+			const standingInstructionsSection = moderatorSettings.standingInstructions
+				? `\n\n## Standing Instructions\n\nThe following instructions apply to ALL group chat sessions. Follow them consistently:\n\n${moderatorSettings.standingInstructions}`
+				: '';
+
+			const fullPrompt = `${baseSystemPrompt}${standingInstructionsSection}
 
 ## Current Participants:
 ${participantContext}${availableSessionsContext}
@@ -771,10 +876,202 @@ export async function routeModeratorResponse(
 	// Track participants that will need to respond for synthesis round
 	const participantsToRespond = new Set<string>();
 
-	// Spawn batch processes for each mentioned participant
-	if (processManager && agentDetector && mentions.length > 0) {
+	// Extract !autorun directives from the moderator message
+	const { autoRunParticipants } = extractAutoRunDirectives(message);
+	if (autoRunParticipants.length > 0) {
+		console.log(
+			`[GroupChat:Debug] Found !autorun directives for: ${autoRunParticipants.join(', ')}`
+		);
+	}
+
+	// Spawn autorun participants
+	if (processManager && agentDetector && autoRunParticipants.length > 0) {
+		console.log(`[GroupChat:Debug] ========== SPAWNING AUTORUN AGENTS ==========`);
+		const sessions = getSessionsCallback?.() || [];
+
+		for (const autoRunName of autoRunParticipants) {
+			// Find participant (may have been auto-added above via @mention detection)
+			const participant = updatedChat.participants.find((p) => mentionMatches(autoRunName, p.name));
+			if (!participant) {
+				console.warn(
+					`[GroupChat:Debug] Autorun participant ${autoRunName} not found in chat - skipping`
+				);
+				const errorMsg: GroupChatMessage = {
+					timestamp: new Date().toISOString(),
+					from: 'system',
+					content: `⚠️ Could not find participant @${autoRunName} for autorun execution. Make sure the agent exists and is added to the group chat.`,
+				};
+				groupChatEmitters.emitMessage?.(groupChatId, errorMsg);
+				continue;
+			}
+
+			const matchingSession = sessions.find(
+				(s) => mentionMatches(s.name, participant.name) || s.name === participant.name
+			);
+			const cwd = matchingSession?.cwd || os.homedir();
+			const autoRunFolderPath = matchingSession?.autoRunFolderPath;
+
+			if (!autoRunFolderPath) {
+				console.warn(
+					`[GroupChat:Debug] No autoRunFolderPath configured for ${participant.name} - skipping`
+				);
+				const errorMsg: GroupChatMessage = {
+					timestamp: new Date().toISOString(),
+					from: 'system',
+					content: `⚠️ No Auto Run folder configured for @${participant.name}. Configure an Auto Run folder in the agent's settings first.`,
+				};
+				groupChatEmitters.emitMessage?.(groupChatId, errorMsg);
+				continue;
+			}
+
+			// Read autorun documents
+			const docs = readAutoRunDocs(autoRunFolderPath);
+			if (docs.length === 0) {
+				console.warn(
+					`[GroupChat:Debug] No autorun documents found in ${autoRunFolderPath} for ${participant.name}`
+				);
+				const errorMsg: GroupChatMessage = {
+					timestamp: new Date().toISOString(),
+					from: 'system',
+					content: `⚠️ No Auto Run documents (.md files) found in ${autoRunFolderPath} for @${participant.name}.`,
+				};
+				groupChatEmitters.emitMessage?.(groupChatId, errorMsg);
+				continue;
+			}
+
+			// Find the first unchecked document (has unchecked tasks)
+			const uncheckedDoc = docs.find((d) => d.content.includes('- [ ]'));
+			const targetDoc = uncheckedDoc || docs[0];
+
+			console.log(
+				`[GroupChat:Debug] Autorun for ${participant.name}: ${docs.length} doc(s), target: ${targetDoc.name}`
+			);
+
+			// Build the autorun prompt using the standard template
+			const autoRunPrompt = autorunDefaultPrompt
+				.replace(/\{\{AGENT_NAME\}\}/g, participant.name)
+				.replace(/\{\{AGENT_PATH\}\}/g, cwd)
+				.replace(/\{\{AUTORUN_FOLDER\}\}/g, autoRunFolderPath)
+				.replace(/\{\{LOOP_NUMBER\}\}/g, '1')
+				.replace(/\{\{GIT_BRANCH\}\}/g, '(group chat execution)')
+				.replace(/\{\{DOCUMENT_PATH\}\}/g, targetDoc.path);
+
+			// Resolve agent and spawn
+			const agent = await agentDetector.getAgent(participant.agentId);
+			if (!agent || !agent.available) {
+				console.error(
+					`[GroupChat:Debug] Agent '${participant.agentId}' not available for autorun ${participant.name}`
+				);
+				continue;
+			}
+
+			const sessionId = `group-chat-${groupChatId}-participant-${participant.name}-${Date.now()}`;
+			const agentConfigValues = getAgentConfigCallback?.(participant.agentId) || {};
+			const baseArgs = buildAgentArgs(agent, {
+				baseArgs: [...agent.args],
+				prompt: autoRunPrompt,
+				cwd,
+				readOnlyMode: false, // Autorun always needs write access
+				agentSessionId: participant.agentSessionId,
+			});
+			const configResolution = applyAgentConfigOverrides(agent, baseArgs, {
+				agentConfigValues,
+				sessionCustomModel: matchingSession?.customModel,
+				sessionCustomArgs: matchingSession?.customArgs,
+				sessionCustomEnvVars: matchingSession?.customEnvVars,
+			});
+
+			try {
+				groupChatEmitters.emitParticipantState?.(groupChatId, participant.name, 'working');
+
+				// Prepare spawn config with potential SSH wrapping
+				let finalSpawnCommand = agent.path || agent.command;
+				let finalSpawnArgs = configResolution.args;
+				let finalSpawnCwd = cwd;
+				let finalSpawnPrompt: string | undefined = autoRunPrompt;
+				let finalSpawnEnvVars =
+					configResolution.effectiveCustomEnvVars ??
+					getCustomEnvVarsCallback?.(participant.agentId);
+				let finalSpawnShell: string | undefined;
+				let finalSpawnRunInShell = false;
+
+				if (sshStore && matchingSession?.sshRemoteConfig) {
+					const sshWrapped = await wrapSpawnWithSsh(
+						{
+							command: finalSpawnCommand,
+							args: finalSpawnArgs,
+							cwd,
+							prompt: autoRunPrompt,
+							customEnvVars:
+								configResolution.effectiveCustomEnvVars ??
+								getCustomEnvVarsCallback?.(participant.agentId),
+							promptArgs: agent.promptArgs,
+							noPromptSeparator: agent.noPromptSeparator,
+							agentBinaryName: agent.binaryName,
+						},
+						matchingSession.sshRemoteConfig,
+						sshStore
+					);
+					finalSpawnCommand = sshWrapped.command;
+					finalSpawnArgs = sshWrapped.args;
+					finalSpawnCwd = sshWrapped.cwd;
+					finalSpawnPrompt = sshWrapped.prompt;
+					finalSpawnEnvVars = sshWrapped.customEnvVars;
+				}
+
+				const winConfig = getWindowsSpawnConfig(
+					participant.agentId,
+					matchingSession?.sshRemoteConfig
+				);
+				if (winConfig.shell) {
+					finalSpawnShell = winConfig.shell;
+					finalSpawnRunInShell = winConfig.runInShell;
+				}
+
+				processManager.spawn({
+					sessionId,
+					toolType: participant.agentId,
+					cwd: finalSpawnCwd,
+					command: finalSpawnCommand,
+					args: finalSpawnArgs,
+					readOnlyMode: false, // Autorun always needs write access
+					prompt: finalSpawnPrompt,
+					contextWindow: getContextWindowValue(agent, agentConfigValues),
+					customEnvVars: finalSpawnEnvVars,
+					promptArgs: agent.promptArgs,
+					noPromptSeparator: agent.noPromptSeparator,
+					shell: finalSpawnShell,
+					runInShell: finalSpawnRunInShell,
+					sendPromptViaStdin: winConfig.sendPromptViaStdin,
+					sendPromptViaStdinRaw: winConfig.sendPromptViaStdinRaw,
+				});
+
+				participantsToRespond.add(participant.name);
+				console.log(
+					`[GroupChat:Debug] Spawned autorun process for @${participant.name} (session ${sessionId})`
+				);
+			} catch (error) {
+				logger.error(`Failed to spawn autorun participant ${participant.name}`, LOG_CONTEXT, {
+					error,
+					groupChatId,
+				});
+				captureException(error, {
+					operation: 'groupChat:spawnAutorunParticipant',
+					participantName: participant.name,
+					groupChatId,
+				});
+			}
+		}
+		console.log(`[GroupChat:Debug] =================================================`);
+	}
+
+	// Spawn batch processes for each mentioned participant (exclude autorun participants)
+	const mentionsToSpawn = mentions.filter(
+		(name) => !autoRunParticipants.some((arName) => mentionMatches(arName, name))
+	);
+	if (processManager && agentDetector && mentionsToSpawn.length > 0) {
 		console.log(`[GroupChat:Debug] ========== SPAWNING PARTICIPANT AGENTS ==========`);
-		console.log(`[GroupChat:Debug] Will spawn ${mentions.length} participant agent(s)`);
+		console.log(`[GroupChat:Debug] Will spawn ${mentionsToSpawn.length} participant agent(s)`);
 
 		// Get available sessions for cwd lookup
 		const sessions = getSessionsCallback?.() || [];
@@ -788,7 +1085,7 @@ export async function routeModeratorResponse(
 			)
 			.join('\n');
 
-		for (const participantName of mentions) {
+		for (const participantName of mentionsToSpawn) {
 			console.log(`[GroupChat:Debug] --- Spawning participant: @${participantName} ---`);
 
 			// Find the participant info
@@ -835,11 +1132,16 @@ export async function routeModeratorResponse(
 			// Get the group chat folder path for file access permissions
 			const groupChatFolder = getGroupChatDir(groupChatId);
 
+			const worktreeSection = matchingSession?.worktreeBasePath
+				? `## Git Worktree\n\nYour configured worktree base directory is: ${matchingSession.worktreeBasePath}\nCreate your git worktree under this directory.\n\n`
+				: '';
+
 			const participantPrompt = groupChatParticipantRequestPrompt
 				.replace(/\{\{PARTICIPANT_NAME\}\}/g, participantName)
 				.replace(/\{\{GROUP_CHAT_NAME\}\}/g, updatedChat.name)
 				.replace(/\{\{READ_ONLY_NOTE\}\}/g, readOnlyNote)
 				.replace(/\{\{GROUP_CHAT_FOLDER\}\}/g, groupChatFolder)
+				.replace(/\{\{WORKTREE_BASE_PATH\}\}/g, worktreeSection)
 				.replace(/\{\{HISTORY_CONTEXT\}\}/g, historyContext)
 				.replace(/\{\{READ_ONLY_LABEL\}\}/g, readOnlyLabel)
 				.replace(/\{\{MESSAGE\}\}/g, message)
@@ -985,8 +1287,10 @@ export async function routeModeratorResponse(
 			}
 		}
 		console.log(`[GroupChat:Debug] =================================================`);
-	} else if (mentions.length === 0) {
-		console.log(`[GroupChat:Debug] No participant @mentions found - moderator response is final`);
+	} else if (mentionsToSpawn.length === 0 && autoRunParticipants.length === 0) {
+		console.log(
+			`[GroupChat:Debug] No participant @mentions or autorun directives found - moderator response is final`
+		);
 		// Set state back to idle since no agents are being spawned
 		groupChatEmitters.emitStateChange?.(groupChatId, 'idle');
 		console.log(`[GroupChat:Debug] Emitted state change: idle`);
@@ -1214,14 +1518,36 @@ export async function spawnModeratorSynthesis(
 
 	// Build participant context for potential follow-up @mentions
 	// Use normalized names (spaces → hyphens) so moderator can @mention them properly
+	const synthSessionsList = getSessionsCallback?.() || [];
 	const participantContext =
 		chat.participants.length > 0
 			? chat.participants
-					.map((p) => `- @${normalizeMentionName(p.name)} (${p.agentId} session)`)
+					.map((p) => {
+						const matchingSession = synthSessionsList.find(
+							(s) => mentionMatches(s.name, p.name) || s.name === p.name
+						);
+						const worktreeNote = matchingSession?.worktreeBasePath
+							? ` [worktree base: ${matchingSession.worktreeBasePath}]`
+							: '';
+						return `- @${normalizeMentionName(p.name)} (${p.agentId} session)${worktreeNote}`;
+					})
 					.join('\n')
 			: '(No agents currently in this group chat)';
 
-	const synthesisPrompt = `${getModeratorSystemPrompt()}
+	// Get moderator settings for prompt customization
+	const synthModeratorSettings = getModeratorSettingsCallback?.() ?? {
+		standingInstructions: '',
+		conductorProfile: '',
+	};
+	const synthBasePrompt = getModeratorSystemPrompt().replace(
+		'{{CONDUCTOR_PROFILE}}',
+		synthModeratorSettings.conductorProfile || '(No conductor profile set)'
+	);
+	const synthStandingInstructions = synthModeratorSettings.standingInstructions
+		? `\n\n## Standing Instructions\n\nThe following instructions apply to ALL group chat sessions. Follow them consistently:\n\n${synthModeratorSettings.standingInstructions}`
+		: '';
+
+	const synthesisPrompt = `${synthBasePrompt}${synthStandingInstructions}
 
 ${getModeratorSynthesisPrompt()}
 
@@ -1385,11 +1711,16 @@ export async function respawnParticipantWithRecovery(
 	const groupChatFolder = getGroupChatDir(groupChatId);
 
 	// Build the recovery prompt - includes standard prompt plus recovery context
+	const recoveryWorktreeSection = matchingSession?.worktreeBasePath
+		? `## Git Worktree\n\nYour configured worktree base directory is: ${matchingSession.worktreeBasePath}\nCreate your git worktree under this directory.\n\n`
+		: '';
+
 	const basePrompt = groupChatParticipantRequestPrompt
 		.replace(/\{\{PARTICIPANT_NAME\}\}/g, participantName)
 		.replace(/\{\{GROUP_CHAT_NAME\}\}/g, chat.name)
 		.replace(/\{\{READ_ONLY_NOTE\}\}/g, readOnlyNote)
 		.replace(/\{\{GROUP_CHAT_FOLDER\}\}/g, groupChatFolder)
+		.replace(/\{\{WORKTREE_BASE_PATH\}\}/g, recoveryWorktreeSection)
 		.replace(/\{\{HISTORY_CONTEXT\}\}/g, historyContext)
 		.replace(/\{\{READ_ONLY_LABEL\}\}/g, readOnlyLabel)
 		.replace(

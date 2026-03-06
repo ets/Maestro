@@ -159,6 +159,8 @@ export function useGroupChatHandlers(): GroupChatHandlersReturn {
 			setGroupChats,
 			setAllGroupChatParticipantStates,
 			setParticipantStates,
+			appendParticipantLiveOutput,
+			clearParticipantLiveOutput,
 		} = useGroupChatStore.getState();
 
 		const unsubState = window.maestro.groupChat.onStateChange((id, state) => {
@@ -199,6 +201,18 @@ export function useGroupChatHandlers(): GroupChatHandlersReturn {
 						return next;
 					});
 				}
+				// Clear live output when participant becomes idle
+				if (state === 'idle') {
+					clearParticipantLiveOutput(participantName);
+				}
+			}
+		);
+
+		const unsubLiveOutput = window.maestro.groupChat.onParticipantLiveOutput?.(
+			(id, participantName, chunk) => {
+				if (id === useGroupChatStore.getState().activeGroupChatId) {
+					appendParticipantLiveOutput(participantName, chunk);
+				}
 			}
 		);
 
@@ -216,6 +230,7 @@ export function useGroupChatHandlers(): GroupChatHandlersReturn {
 			unsubState();
 			unsubParticipants();
 			unsubParticipantState?.();
+			unsubLiveOutput?.();
 			unsubModeratorSessionId?.();
 		};
 	}, []); // Mount once — global listeners read activeGroupChatId from store at call time

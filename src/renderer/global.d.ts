@@ -1874,6 +1874,9 @@ interface MaestroAPI {
 		onParticipantState: (
 			callback: (groupChatId: string, participantName: string, state: 'idle' | 'working') => void
 		) => () => void;
+		onParticipantLiveOutput: (
+			callback: (groupChatId: string, participantName: string, chunk: string) => void
+		) => () => void;
 		onModeratorSessionIdChanged: (
 			callback: (groupChatId: string, sessionId: string) => void
 		) => () => void;

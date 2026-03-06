@@ -5,6 +5,7 @@
 
 import type { ProcessManager } from '../process-manager';
 import { GROUP_CHAT_PREFIX, type ProcessListenerDependencies } from './types';
+import { groupChatEmitters } from '../ipc/handlers/groupChat';
 
 /**
  * Maximum buffer size per session (10MB).
@@ -91,6 +92,12 @@ export function setupDataListener(
 					`WARNING: Buffer size ${totalLength} exceeds ${MAX_BUFFER_SIZE} bytes for participant ${participantInfo.participantName}`
 				);
 			}
+			// Emit live output chunk to renderer for peek display
+			groupChatEmitters.emitParticipantLiveOutput?.(
+				participantInfo.groupChatId,
+				participantInfo.participantName,
+				data
+			);
 			return; // Don't send to regular process:data handler
 		}
 

@@ -204,6 +204,15 @@ export function createGroupChatApi() {
 			return () => ipcRenderer.removeListener('groupChat:participantState', handler);
 		},
 
+		onParticipantLiveOutput: (
+			callback: (groupChatId: string, participantName: string, chunk: string) => void
+		) => {
+			const handler = (_: any, groupChatId: string, participantName: string, chunk: string) =>
+				callback(groupChatId, participantName, chunk);
+			ipcRenderer.on('groupChat:participantLiveOutput', handler);
+			return () => ipcRenderer.removeListener('groupChat:participantLiveOutput', handler);
+		},
+
 		onModeratorSessionIdChanged: (callback: (groupChatId: string, sessionId: string) => void) => {
 			const handler = (_: any, groupChatId: string, sessionId: string) =>
 				callback(groupChatId, sessionId);

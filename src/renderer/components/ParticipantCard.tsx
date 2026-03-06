@@ -5,8 +5,17 @@
  * session ID, context usage, stats, and cost.
  */
 
-import { MessageSquare, Copy, Check, DollarSign, RotateCcw, Server } from 'lucide-react';
-import { useState, useCallback } from 'react';
+import {
+	MessageSquare,
+	Copy,
+	Check,
+	DollarSign,
+	RotateCcw,
+	Server,
+	Eye,
+	EyeOff,
+} from 'lucide-react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type { Theme, GroupChatParticipant, SessionState } from '../types';
 import { getStatusColor } from '../utils/theme';
 import { formatCost } from '../utils/formatters';
@@ -19,6 +28,7 @@ interface ParticipantCardProps {
 	color?: string;
 	groupChatId?: string;
 	onContextReset?: (participantName: string) => void;
+	liveOutput?: string;
 }
 
 /**
@@ -39,9 +49,26 @@ export function ParticipantCard({
 	color,
 	groupChatId,
 	onContextReset,
+	liveOutput,
 }: ParticipantCardProps): JSX.Element {
 	const [copied, setCopied] = useState(false);
 	const [isResetting, setIsResetting] = useState(false);
+	const [peekOpen, setPeekOpen] = useState(false);
+	const peekRef = useRef<HTMLPreElement>(null);
+
+	// Auto-scroll peek output to bottom
+	useEffect(() => {
+		if (peekOpen && peekRef.current) {
+			peekRef.current.scrollTop = peekRef.current.scrollHeight;
+		}
+	}, [peekOpen, liveOutput]);
+
+	// Close peek when participant goes idle (no more output)
+	useEffect(() => {
+		if (state !== 'busy' && state !== 'connecting') {
+			setPeekOpen(false);
+		}
+	}, [state]);
 
 	// Use agent's session ID (clean GUID) when available, otherwise show pending
 	const agentSessionId = participant.agentSessionId;
@@ -237,6 +264,37 @@ export function ParticipantCard({
 					</span>
 				)}
 			</div>
+
+			{/* Live output peek */}
+			{(state === 'busy' || state === 'connecting') && liveOutput && (
+				<div className="mt-2">
+					<button
+						onClick={() => setPeekOpen((v) => !v)}
+						className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded hover:opacity-80 transition-opacity cursor-pointer"
+						style={{
+							backgroundColor: `${theme.colors.accent}15`,
+							color: theme.colors.textDim,
+						}}
+					>
+						{peekOpen ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+						Peek
+					</button>
+					{peekOpen && (
+						<pre
+							ref={peekRef}
+							className="mt-1 text-[10px] leading-tight rounded p-2 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words font-mono"
+							style={{
+								maxHeight: '200px',
+								backgroundColor: `${theme.colors.bgMain}80`,
+								color: theme.colors.textDim,
+								border: `1px solid ${theme.colors.border}`,
+							}}
+						>
+							{liveOutput.length > 4096 ? liveOutput.slice(-4096) : liveOutput}
+						</pre>
+					)}
+				</div>
+			)}
 		</div>
 	);
 }

@@ -100,6 +100,7 @@ export const groupChatEmitters: {
 		state: ParticipantState
 	) => void;
 	emitModeratorSessionIdChanged?: (groupChatId: string, sessionId: string) => void;
+	emitParticipantLiveOutput?: (groupChatId: string, participantName: string, chunk: string) => void;
 } = {};
 
 // Helper to create handler options with consistent context
@@ -869,6 +870,26 @@ Respond with ONLY the summary text, no additional commentary.`;
 		const mainWindow = getMainWindow();
 		if (isWebContentsAvailable(mainWindow)) {
 			mainWindow.webContents.send('groupChat:moderatorSessionIdChanged', groupChatId, sessionId);
+		}
+	};
+
+	/**
+	 * Emit live output chunks from a participant to the renderer.
+	 * Called as data streams in from participant processes.
+	 */
+	groupChatEmitters.emitParticipantLiveOutput = (
+		groupChatId: string,
+		participantName: string,
+		chunk: string
+	): void => {
+		const mainWindow = getMainWindow();
+		if (isWebContentsAvailable(mainWindow)) {
+			mainWindow.webContents.send(
+				'groupChat:participantLiveOutput',
+				groupChatId,
+				participantName,
+				chunk
+			);
 		}
 	};
 
