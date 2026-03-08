@@ -4679,6 +4679,17 @@ describe('Symphony IPC handlers', () => {
 					validStartContributionParams.localPath,
 					'owner/repo'
 				);
+
+				// Verify ensureForkSetup ran after the checkout
+				const checkoutCallIdx = vi
+					.mocked(execFileNoThrow)
+					.mock.invocationCallOrder.find((order, i) => {
+						const call = vi.mocked(execFileNoThrow).mock.calls[i];
+						return call[0] === 'git' && call[1]?.[0] === 'checkout';
+					});
+				const forkSetupCallIdx = vi.mocked(ensureForkSetup).mock.invocationCallOrder[0];
+				expect(checkoutCallIdx).toBeDefined();
+				expect(forkSetupCallIdx).toBeGreaterThan(checkoutCallIdx!);
 			});
 
 			it('should return error when fork setup fails', async () => {
@@ -4733,6 +4744,7 @@ describe('Symphony IPC handlers', () => {
 				expect(metadata.isFork).toBe(true);
 				expect(metadata.forkSlug).toBe('chris/repo');
 				expect(metadata.upstreamSlug).toBe('owner/repo');
+				expect(metadata.upstreamDefaultBranch).toBe('main');
 			});
 		});
 	});
@@ -4759,6 +4771,7 @@ describe('Symphony IPC handlers', () => {
 				isFork?: boolean;
 				forkSlug?: string;
 				upstreamSlug?: string;
+				upstreamDefaultBranch?: string;
 			}>
 		) => ({
 			contributionId: 'contrib_draft_test',
@@ -5239,6 +5252,7 @@ describe('Symphony IPC handlers', () => {
 					isFork: true,
 					forkSlug: 'chris/repo',
 					upstreamSlug: 'owner/repo',
+					upstreamDefaultBranch: 'develop',
 				});
 				const stateWithActiveContrib = {
 					active: [
@@ -5296,6 +5310,9 @@ describe('Symphony IPC handlers', () => {
 				const repoIdx = prArgs.indexOf('--repo');
 				expect(repoIdx).toBeGreaterThan(-1);
 				expect(prArgs[repoIdx + 1]).toBe('owner/repo');
+				// Should use upstreamDefaultBranch from metadata as --base
+				const baseIdx = prArgs.indexOf('--base');
+				expect(prArgs[baseIdx + 1]).toBe('develop');
 			});
 
 			it('should not pass fork args when metadata has no fork info', async () => {
