@@ -26,14 +26,16 @@ To add support for a new agent, follow this checklist. The agent completeness te
 
 1. **Add agent ID** to `src/shared/agentIds.ts` → `AGENT_IDS` tuple
 2. **Add agent definition** to `src/main/agents/definitions.ts` → `AGENT_DEFINITIONS` array
-3. **Define capabilities** in `src/main/agents/capabilities.ts` → `AGENT_CAPABILITIES` record (19 boolean fields)
-4. **Add context window default** (if applicable) to `src/shared/agentConstants.ts` → `DEFAULT_CONTEXT_WINDOWS`
+3. **Define capabilities** in `src/main/agents/capabilities.ts` → `AGENT_CAPABILITIES` record (23 boolean fields)
+4. **Add display name & beta status** to `src/shared/agentMetadata.ts` → `AGENT_DISPLAY_NAMES` record, optionally add to `BETA_AGENTS` set
+5. **Add context window default** (if applicable) to `src/shared/agentConstants.ts` → `DEFAULT_CONTEXT_WINDOWS`
+6. **Sync renderer interfaces** — add any new capability flags to `AgentCapabilities` in `src/renderer/hooks/agent/useAgentCapabilities.ts`, `src/renderer/types/index.ts`, and `src/renderer/global.d.ts`
 
 #### Conditional Steps (based on capabilities)
 
-5. **If `supportsJsonOutput: true`**: Create output parser at `src/main/parsers/{agent}-output-parser.ts`, register in `src/main/parsers/index.ts`
-6. **If output parser exists**: Add error patterns to `src/main/parsers/error-patterns.ts`
-7. **If `supportsSessionStorage: true`**: Create session storage extending `BaseSessionStorage` at `src/main/storage/{agent}-session-storage.ts`, register in `src/main/storage/index.ts`
+7. **If `supportsJsonOutput: true`**: Create output parser at `src/main/parsers/{agent}-output-parser.ts`, register in `src/main/parsers/index.ts`
+8. **If output parser exists**: Add error patterns to `src/main/parsers/error-patterns.ts`
+9. **If `supportsSessionStorage: true`**: Create session storage extending `BaseSessionStorage` at `src/main/storage/{agent}-session-storage.ts`, register in `src/main/storage/index.ts`
 
 #### CI Enforcement
 
@@ -142,22 +144,36 @@ interface AgentCapabilities {
 
 	// Message classification
 	supportsResultMessages: boolean; // Distinguishes final result from intermediary
+
+	// Feature gating (used instead of hardcoded agent ID lists)
+	supportsWizard: boolean; // Supports inline wizard structured output
+	supportsGroupChatModeration: boolean; // Can serve as group chat moderator
+	usesJsonLineOutput: boolean; // Uses JSONL (not JSON) in batch mode
+	usesCombinedContextWindow: boolean; // Combined input+output context display
 }
 ```
 
+> **Note:** This interface is duplicated in 4 places that must stay in sync:
+> `src/main/agents/capabilities.ts`, `src/renderer/hooks/agent/useAgentCapabilities.ts`,
+> `src/renderer/types/index.ts`, `src/renderer/global.d.ts`
+
 ### Capability-to-UI Feature Mapping
 
-| Capability               | UI Feature                 | Hidden When False     |
-| ------------------------ | -------------------------- | --------------------- |
-| `supportsReadOnlyMode`   | Read-only toggle           | Toggle hidden         |
-| `supportsSessionStorage` | Sessions browser tab       | Tab hidden            |
-| `supportsResume`         | Resume button              | Button disabled       |
-| `supportsCostTracking`   | Cost widget                | Widget hidden         |
-| `supportsUsageStats`     | Token usage display        | Display hidden        |
-| `supportsImageInput`     | Image attachment button    | Button hidden         |
-| `supportsSlashCommands`  | Slash command autocomplete | Autocomplete disabled |
-| `supportsSessionId`      | Session ID pill            | Pill hidden           |
-| `supportsResultMessages` | Show only final result     | Shows all messages    |
+| Capability                    | UI Feature                 | Hidden When False     |
+| ----------------------------- | -------------------------- | --------------------- |
+| `supportsReadOnlyMode`        | Read-only toggle           | Toggle hidden         |
+| `supportsSessionStorage`      | Sessions browser tab       | Tab hidden            |
+| `supportsResume`              | Resume button              | Button disabled       |
+| `supportsCostTracking`        | Cost widget                | Widget hidden         |
+| `supportsUsageStats`          | Token usage display        | Display hidden        |
+| `supportsImageInput`          | Image attachment button    | Button hidden         |
+| `supportsSlashCommands`       | Slash command autocomplete | Autocomplete disabled |
+| `supportsSessionId`           | Session ID pill            | Pill hidden           |
+| `supportsResultMessages`      | Show only final result     | Shows all messages    |
+| `supportsWizard`              | Wizard agent selection     | Agent excluded        |
+| `supportsGroupChatModeration` | Moderator dropdown         | Agent excluded        |
+| `usesJsonLineOutput`          | CLI batch parsing strategy | Uses JSON fallback    |
+| `usesCombinedContextWindow`   | Context bar display        | Separate bars         |
 
 ### Context Window Configuration
 
@@ -214,6 +230,10 @@ When adding a new agent, start with all capabilities set to `false`:
   supportsBatchMode: false,
   supportsStreaming: false,
   supportsResultMessages: false,
+  supportsWizard: false,
+  supportsGroupChatModeration: false,
+  usesJsonLineOutput: false,
+  usesCombinedContextWindow: false,
 },
 ```
 
@@ -281,6 +301,26 @@ const AGENT_DEFINITIONS: AgentConfig[] = [
 ];
 ```
 
+### Step 2.5: Add Display Name & Beta Status
+
+Edit `src/shared/agentMetadata.ts`:
+
+```typescript
+// Add to AGENT_DISPLAY_NAMES record
+export const AGENT_DISPLAY_NAMES: Record<AgentId, string> = {
+	// ... existing agents
+	'your-agent': 'Your Agent',
+};
+
+// If beta, add to BETA_AGENTS set
+export const BETA_AGENTS: ReadonlySet<AgentId> = new Set([
+	'codex',
+	'opencode',
+	'factory-droid',
+	'your-agent', // Add here if beta
+]);
+```
+
 ### Step 3: Define Capabilities
 
 Edit `src/main/agents/capabilities.ts`:
@@ -301,6 +341,10 @@ const AGENT_CAPABILITIES: Record<string, AgentCapabilities> = {
 		supportsBatchMode: true,
 		supportsStreaming: true,
 		supportsResultMessages: false, // Enable if result vs intermediary distinction
+		supportsWizard: false, // Enable if structured wizard output works
+		supportsGroupChatModeration: false, // Enable if agent can moderate group chats
+		usesJsonLineOutput: false, // true if batch output is JSONL (not JSON)
+		usesCombinedContextWindow: false, // true if context = input + output combined
 	},
 };
 ```
