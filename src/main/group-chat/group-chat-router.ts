@@ -275,6 +275,7 @@ export function clearPendingParticipants(groupChatId: string): void {
 		}
 	}
 	pendingParticipantResponses.delete(groupChatId);
+	autoRunParticipantTracker.delete(groupChatId);
 }
 
 /**
@@ -283,6 +284,12 @@ export function clearPendingParticipants(groupChatId: string): void {
  */
 export function markParticipantResponded(groupChatId: string, participantName: string): boolean {
 	clearParticipantResponseTimeout(groupChatId, participantName);
+
+	// Clean up autorun tracking for this participant
+	const autoRunSet = autoRunParticipantTracker.get(groupChatId);
+	if (autoRunSet?.delete(participantName) && autoRunSet.size === 0) {
+		autoRunParticipantTracker.delete(groupChatId);
+	}
 
 	const pending = pendingParticipantResponses.get(groupChatId);
 	if (!pending) return false;
@@ -857,40 +864,50 @@ export async function routeModeratorResponse(
 		cleanedText: displayMessage,
 	} = extractAutoRunDirectives(message);
 
-	// Log the message as coming from moderator (cleaned of !autorun directives)
-	await appendToLog(chat.logPath, 'moderator', displayMessage);
-	console.log(`[GroupChat:Debug] Message appended to log`);
+	// Only persist/emit the moderator message if it has visible content after stripping directives
+	const shouldPersistModeratorMessage = displayMessage.trim().length > 0;
 
-	// Emit message event to renderer so it shows immediately
-	const moderatorMessage: GroupChatMessage = {
-		timestamp: new Date().toISOString(),
-		from: 'moderator',
-		content: displayMessage,
-	};
-	groupChatEmitters.emitMessage?.(groupChatId, moderatorMessage);
-	console.log(`[GroupChat:Debug] Emitted moderator message to renderer`);
+	if (shouldPersistModeratorMessage) {
+		// Log the message as coming from moderator (cleaned of !autorun directives)
+		await appendToLog(chat.logPath, 'moderator', displayMessage);
+		console.log(`[GroupChat:Debug] Message appended to log`);
+
+		// Emit message event to renderer so it shows immediately
+		const moderatorMessage: GroupChatMessage = {
+			timestamp: new Date().toISOString(),
+			from: 'moderator',
+			content: displayMessage,
+		};
+		groupChatEmitters.emitMessage?.(groupChatId, moderatorMessage);
+		console.log(`[GroupChat:Debug] Emitted moderator message to renderer`);
+	}
 
 	// Add history entry for moderator response
-	try {
-		const summary = extractFirstSentence(displayMessage);
-		const historyEntry = await addGroupChatHistoryEntry(groupChatId, {
-			timestamp: Date.now(),
-			summary,
-			participantName: 'Moderator',
-			participantColor: '#808080', // Gray for moderator
-			type: 'response',
-			fullResponse: displayMessage,
-		});
+	if (shouldPersistModeratorMessage) {
+		try {
+			const summary = extractFirstSentence(displayMessage);
+			const historyEntry = await addGroupChatHistoryEntry(groupChatId, {
+				timestamp: Date.now(),
+				summary,
+				participantName: 'Moderator',
+				participantColor: '#808080', // Gray for moderator
+				type: 'response',
+				fullResponse: displayMessage,
+			});
 
-		// Emit history entry event to renderer
-		groupChatEmitters.emitHistoryEntry?.(groupChatId, historyEntry);
-		console.log(
-			`[GroupChatRouter] Added history entry for Moderator: ${summary.substring(0, 50)}...`
-		);
-	} catch (error) {
-		logger.error('Failed to add history entry for Moderator', LOG_CONTEXT, { error, groupChatId });
-		captureException(error, { operation: 'groupChat:addModeratorHistory', groupChatId });
-		// Don't throw - history logging failure shouldn't break the message flow
+			// Emit history entry event to renderer
+			groupChatEmitters.emitHistoryEntry?.(groupChatId, historyEntry);
+			console.log(
+				`[GroupChatRouter] Added history entry for Moderator: ${summary.substring(0, 50)}...`
+			);
+		} catch (error) {
+			logger.error('Failed to add history entry for Moderator', LOG_CONTEXT, {
+				error,
+				groupChatId,
+			});
+			captureException(error, { operation: 'groupChat:addModeratorHistory', groupChatId });
+			// Don't throw - history logging failure shouldn't break the message flow
+		}
 	}
 
 	// Extract ALL mentions from the message
