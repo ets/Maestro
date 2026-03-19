@@ -227,11 +227,7 @@ cat > ~/.config/fontconfig/conf.d/50-windows-fonts.conf <<'EOF'
 EOF
 ```
 
-Then rebuild the cache:
-
-```fc-cache -f -v
-
-```
+Then rebuild the cache: `fc-cache -f -v`
 
 ## Getting Help
 
