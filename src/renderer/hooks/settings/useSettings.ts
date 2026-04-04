@@ -338,6 +338,18 @@ export function useSettings(): UseSettingsReturn {
 		return cleanup;
 	}, []);
 
+	// Reload settings when external change detected (e.g., maestro-cli settings set)
+	useEffect(() => {
+		if (!window.maestro?.settings?.onExternalChange) {
+			return;
+		}
+		const cleanup = window.maestro.settings.onExternalChange(() => {
+			console.log('[Settings] External settings change detected, reloading');
+			loadAllSettings();
+		});
+		return cleanup;
+	}, []);
+
 	// Apply font size to HTML root element so rem-based Tailwind classes scale
 	// Only apply after settings are loaded to prevent layout shift from default->saved font size
 	useEffect(() => {

@@ -110,6 +110,7 @@ import { createWebServerFactory } from './web-server/web-server-factory';
 import {
 	setupGlobalErrorHandlers,
 	createCliWatcher,
+	createSettingsWatcher,
 	createWindowManager,
 	createQuitHandler,
 } from './app-lifecycle';
@@ -260,6 +261,13 @@ const cliWatcher = createCliWatcher({
 	getUserDataPath: () => app.getPath('userData'),
 });
 
+// Create settings file watcher for external changes (e.g., from maestro-cli)
+const settingsWatcher = createSettingsWatcher({
+	getMainWindow: () => mainWindow,
+	getSettingsPath: () => syncPath,
+	getAgentConfigsPath: () => productionDataPath,
+});
+
 const devServerPort = process.env.VITE_PORT ? parseInt(process.env.VITE_PORT, 10) : 5173;
 const devServerUrl = `http://localhost:${devServerPort}`;
 
@@ -408,6 +416,9 @@ app.whenReady().then(async () => {
 	// Start CLI activity watcher (Phase 4 refactoring)
 	cliWatcher.start();
 
+	// Start settings file watcher for external changes (e.g., maestro-cli settings set)
+	settingsWatcher.start();
+
 	// Note: Web server is not auto-started - it starts when user enables web interface
 	// via live:startServer IPC call from the renderer
 
@@ -444,6 +455,7 @@ const quitHandler = createQuitHandler({
 	cleanupAllGroomingSessions,
 	closeStatsDB,
 	stopCliWatcher: () => cliWatcher.stop(),
+	stopSettingsWatcher: () => settingsWatcher.stop(),
 	powerManager,
 	stopSessionCleanup,
 });
